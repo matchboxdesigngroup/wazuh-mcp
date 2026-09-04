@@ -1,0 +1,15 @@
+# Credentials. Broad on purpose: a stray .env.bak must never be committable,
+# while the checked-in template stays tracked.
+.env
+.env.*
+!.env.example
+*.bak
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+uv.lock
