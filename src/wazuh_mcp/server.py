@@ -5,8 +5,12 @@ from __future__ import annotations
 import logging
 import sys
 
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 
+from .auth import StaticTokenVerifier
+from .config import Settings
 from .context import WazuhContext
 from .tools import MODULES
 
@@ -46,6 +50,24 @@ affects production endpoints — confirm with the user before invoking it.
 """
 
 
+def transport_security_for(settings: Settings) -> TransportSecuritySettings:
+    """DNS-rebinding protection for the HTTP transport.
+
+    Passed to `run_streamable_http_async`, not to the constructor. Behind a
+    reverse proxy the Host header is whatever the proxy forwards, so the
+    allowlist has to include the public name as well as the bind address.
+    """
+    allowlist = settings.host_allowlist
+    return TransportSecuritySettings(
+        allowed_hosts=allowlist,
+        allowed_origins=[
+            origin
+            for host in allowlist
+            for origin in (f"https://{host}", f"http://{host}")
+        ],
+    )
+
+
 def build_server(ctx: WazuhContext | None = None) -> tuple[MCPServer, WazuhContext]:
     """Construct the server and register all tools.
 
@@ -62,11 +84,31 @@ def build_server(ctx: WazuhContext | None = None) -> tuple[MCPServer, WazuhConte
         stream=sys.stderr,
     )
 
+    kwargs: dict[str, object] = {}
+    if context.settings.transport == "http":
+        # Fails closed: no usable token means the server does not start.
+        tokens = context.settings.require_http_auth()
+        verifier = StaticTokenVerifier(tokens, resource=context.settings.public_url)
+        kwargs["token_verifier"] = verifier
+        # The SDK rejects a verifier without AuthSettings. No auth_server_provider
+        # is passed, so no OAuth endpoints are created — these URLs only feed the
+        # protected-resource metadata that a 401 points at.
+        kwargs["auth"] = AuthSettings(
+            issuer_url=context.settings.public_url,
+            resource_server_url=context.settings.public_url,
+        )
+        log.info(
+            "HTTP transport: %d token(s) accepted (%s), Host allowlist %s",
+            len(tokens), ", ".join(verifier.token_labels),
+            ", ".join(context.settings.host_allowlist),
+        )
+
     server = MCPServer(
         name="wazuh",
         title="Wazuh",
         version="0.1.0",
         instructions=INSTRUCTIONS,
+        **kwargs,  # type: ignore[arg-type]
     )
 
     for module in MODULES:

@@ -55,6 +55,40 @@ Create a dedicated Wazuh API user with a read-only RBAC role instead of reusing
 only `read` actions — the server's read-only default and the API's own RBAC then
 reinforce each other.
 
+## Transports
+
+**stdio** (default) for a local client — no token, no network surface.
+
+**streamable HTTP** for remote clients, authenticated with a bearer token:
+
+```bash
+WAZUH_TRANSPORT=http WAZUH_PUBLIC_URL=https://wazuh.example.com/mcp \
+WAZUH_AUTH_TOKENS=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))') \
+uv run wazuh-mcp
+```
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `WAZUH_TRANSPORT` | `stdio` | `stdio` or `http` |
+| `WAZUH_BIND_HOST` | `127.0.0.1` | Bind address; leave on loopback behind a proxy |
+| `WAZUH_BIND_PORT` | `8080` | Bind port |
+| `WAZUH_HTTP_PATH` | `/mcp` | URL path to serve on |
+| `WAZUH_PUBLIC_URL` | — | Required for `http`; the URL clients reach |
+| `WAZUH_AUTH_TOKENS` | — | Required for `http`; comma-separated to rotate |
+| `WAZUH_ALLOWED_HOSTS` | from `public_url` | Accepted `Host` values |
+
+The HTTP transport **fails closed**: it will not start without a token of at
+least 32 characters, or without `WAZUH_PUBLIC_URL`. Requests arrive as
+`Authorization: Bearer <token>`; anything else gets a 401 carrying the
+protected-resource metadata URL. DNS-rebinding protection is on, so the `Host`
+header must appear in the allowlist — a forged one gets 421.
+
+Terminate TLS in front of it. A bearer token over plain HTTP is sent in clear
+text, and binding to anything other than loopback logs a warning saying so.
+See [deploy/DEPLOY.md](deploy/DEPLOY.md) for a systemd + nginx deployment,
+including the point that running on the Wazuh host lets you close ports 55000
+and 9200 entirely.
+
 ## Connect it
 
 ### Claude Code

@@ -1,0 +1,49 @@
+# /etc/systemd/system/wazuh-mcp.service
+[Unit]
+Description=Wazuh MCP server
+Documentation=https://github.com/matchbox/wazuh-mcp
+# Not a hard dependency: the server starts fine before Wazuh and reports the
+# backend as unreachable until it is up.
+After=network-online.target wazuh-manager.service wazuh-indexer.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wazuh-mcp
+Group=wazuh-mcp
+WorkingDirectory=/opt/wazuh-mcp
+EnvironmentFile=/etc/wazuh-mcp/wazuh-mcp.env
+ExecStart=/opt/wazuh-mcp/.venv/bin/wazuh-mcp
+Restart=on-failure
+RestartSec=5s
+# Exit 2 is a configuration error; restarting cannot fix it.
+RestartPreventExitStatus=2
+
+# --- Hardening -------------------------------------------------------------
+# The process reads two HTTP APIs on loopback and serves one port. It needs no
+# filesystem writes, no privileges and no raw sockets.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
