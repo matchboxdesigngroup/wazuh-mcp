@@ -53,7 +53,9 @@ def test_discovery_is_public_and_correct(client, path):
 def test_issuer_is_configurable():
     with make_client(issuer_url="https://idp.example.com") as c:
         for path in DISCOVERY:
-            assert c.get(path).json()["authorization_servers"] == ["https://idp.example.com"]
+            servers = c.get(path).json()["authorization_servers"]
+            # Pydantic's URL type adds a trailing slash to a bare origin.
+            assert [u.rstrip("/") for u in servers] == ["https://idp.example.com"]
 
 
 def test_unauthenticated_mcp_points_at_a_live_metadata_url(client):
