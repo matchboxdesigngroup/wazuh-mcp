@@ -5,9 +5,14 @@ from __future__ import annotations
 import logging
 import sys
 
+from mcp.server.auth.handlers.metadata import ProtectedResourceMetadataHandler
+from mcp.server.auth.routes import cors_middleware
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.shared.auth import ProtectedResourceMetadata
+from pydantic import AnyHttpUrl
+from starlette.routing import Route
 
 from .auth import StaticTokenVerifier
 from .config import Settings
@@ -68,6 +73,32 @@ def transport_security_for(settings: Settings) -> TransportSecuritySettings:
     )
 
 
+#: The only unauthenticated path this app adds beyond the SDK's own
+#: `/.well-known/oauth-protected-resource/<mcp path>` route. Exact match, no prefix.
+ROOT_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource"
+
+
+def _add_root_resource_metadata(server: MCPServer, settings: Settings) -> None:
+    """Serve the RFC 9728 metadata at the un-suffixed well-known path too.
+
+    Some clients probe the root form before (or instead of) the path-suffixed
+    one; answering 200 spares them the fallback probes that trip Wazuh's
+    web-error rules. Public by design: it only restates the URLs in the 401.
+    """
+    metadata = ProtectedResourceMetadata(
+        resource=AnyHttpUrl(settings.public_url),
+        authorization_servers=[AnyHttpUrl(settings.effective_issuer_url)],
+    )
+    handler = ProtectedResourceMetadataHandler(metadata)
+    server._custom_starlette_routes.append(
+        Route(
+            ROOT_RESOURCE_METADATA_PATH,
+            endpoint=cors_middleware(handler.handle, ["GET", "OPTIONS"]),
+            methods=["GET", "OPTIONS"],
+        )
+    )
+
+
 def build_server(ctx: WazuhContext | None = None) -> tuple[MCPServer, WazuhContext]:
     """Construct the server and register all tools.
 
@@ -92,9 +123,10 @@ def build_server(ctx: WazuhContext | None = None) -> tuple[MCPServer, WazuhConte
         kwargs["token_verifier"] = verifier
         # The SDK rejects a verifier without AuthSettings. No auth_server_provider
         # is passed, so no OAuth endpoints are created — these URLs only feed the
-        # protected-resource metadata that a 401 points at.
+        # protected-resource metadata that a 401 points at. The SDK serves that
+        # metadata, unauthenticated, at /.well-known/oauth-protected-resource/<path>.
         kwargs["auth"] = AuthSettings(
-            issuer_url=context.settings.public_url,
+            issuer_url=context.settings.effective_issuer_url,
             resource_server_url=context.settings.public_url,
         )
         log.info(
@@ -110,6 +142,9 @@ def build_server(ctx: WazuhContext | None = None) -> tuple[MCPServer, WazuhConte
         instructions=INSTRUCTIONS,
         **kwargs,  # type: ignore[arg-type]
     )
+
+    if context.settings.transport == "http":
+        _add_root_resource_metadata(server, context.settings)
 
     for module in MODULES:
         module.register(server, context)
