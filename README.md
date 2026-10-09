@@ -74,6 +74,7 @@ uv run wazuh-mcp
 | `WAZUH_BIND_PORT` | `8080` | Bind port |
 | `WAZUH_HTTP_PATH` | `/mcp` | URL path to serve on |
 | `WAZUH_PUBLIC_URL` | — | Required for `http`; the URL clients reach |
+| `WAZUH_ISSUER_URL` | `public_url` | Advertised as `authorization_servers` in the resource metadata |
 | `WAZUH_AUTH_TOKENS` | — | Required for `http`; comma-separated to rotate |
 | `WAZUH_ALLOWED_HOSTS` | from `public_url` | Accepted `Host` values |
 
@@ -82,6 +83,14 @@ least 32 characters, or without `WAZUH_PUBLIC_URL`. Requests arrive as
 `Authorization: Bearer <token>`; anything else gets a 401 carrying the
 protected-resource metadata URL. DNS-rebinding protection is on, so the `Host`
 header must appear in the allowlist — a forged one gets 421.
+
+Public (unauthenticated) paths are exactly the RFC 9728 metadata at
+`/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp`.
+This server is not an OAuth authorization server: clients must send the static
+token themselves (e.g. `npx mcp-remote <url> --header "Authorization: Bearer $TOKEN"`).
+A bare `GET /mcp` with a valid token but no `Mcp-Session-Id` returns 400 — that is
+the SDK's stateful Streamable HTTP behaviour (GET is only for resuming a session's
+SSE stream), not a bug. Without a token it returns 401.
 
 Terminate TLS in front of it. A bearer token over plain HTTP is sent in clear
 text, and binding to anything other than loopback logs a warning saying so.

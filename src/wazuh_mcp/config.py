@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     #: https://wazuh.example.com/mcp. Used for the protected-resource metadata
     #: in 401 responses and to derive the allowed Host header.
     public_url: str | None = None
+    #: Issuer advertised as `authorization_servers` in the protected-resource
+    #: metadata. Defaults to `public_url`. Set it to an external OAuth server's
+    #: issuer URL if one is ever put in front of this resource.
+    issuer_url: str | None = None
     #: Comma-separated bearer tokens accepted by the HTTP transport. Several
     #: may be listed so a token can be rotated without downtime.
     auth_tokens: str | None = None
@@ -69,7 +73,7 @@ class Settings(BaseSettings):
     vulnerability_index: str = "wazuh-states-vulnerabilities-*"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
-    @field_validator("public_url")
+    @field_validator("public_url", "issuer_url")
     @classmethod
     def _normalise_public_url(cls, v: str | None) -> str | None:
         if v is None:
@@ -110,6 +114,10 @@ class Settings(BaseSettings):
         if self.ca_bundle:
             return ssl.create_default_context(cafile=self.ca_bundle)
         return self.verify_ssl
+
+    @property
+    def effective_issuer_url(self) -> str | None:
+        return self.issuer_url or self.public_url
 
     @property
     def tokens(self) -> list[str]:

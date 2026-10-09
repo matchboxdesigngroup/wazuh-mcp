@@ -1,0 +1,17 @@
+<!--
+  Append to /var/ossec/etc/rules/local_rules.xml on the Wazuh manager.
+
+  OAuth discovery probes (/.well-known/...) legitimately 4xx on servers that do
+  not implement every fallback path. Stock rule 31101 ("Web server 400 error
+  code") feeds frequency rule 31151 ("Multiple web server 400 error codes from
+  same source ip"), whose active response bans the client. This child rule
+  matches first for /.well-known/ requests, so they no longer count toward 31151.
+  Stock rules are untouched. 100210 must be unused locally; change it if not.
+-->
+<group name="local,web,accesslog,">
+  <rule id="100210" level="0">
+    <if_sid>31101</if_sid>
+    <url type="pcre2">^/\.well-known/</url>
+    <description>Ignore 4xx on OAuth discovery (/.well-known/) paths.</description>
+  </rule>
+</group>
