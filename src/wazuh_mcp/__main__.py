@@ -9,7 +9,7 @@ import sys
 
 from pydantic import ValidationError
 
-from .config import Settings, load_settings
+from .config import Settings
 from .context import WazuhContext
 from .errors import WazuhMCPError
 from .server import build_server, transport_security_for
@@ -36,8 +36,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def settings_from(args: argparse.Namespace) -> Settings:
-    """Apply CLI overrides on top of the environment-derived settings."""
-    settings = load_settings()
+    """Apply CLI overrides on top of the environment-derived settings.
+
+    Overrides are passed as constructor arguments so that field validators
+    (port range, path normalisation, etc.) run instead of being bypassed by
+    ``model_copy(update=...)``.
+    """
     overrides = {
         "transport": args.transport,
         "bind_host": args.host,
@@ -45,7 +49,7 @@ def settings_from(args: argparse.Namespace) -> Settings:
         "http_path": args.path,
     }
     supplied = {k: v for k, v in overrides.items() if v is not None}
-    return settings.model_copy(update=supplied) if supplied else settings
+    return Settings(**supplied)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -56,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     except (WazuhMCPError, ValidationError, ValueError) as exc:
         # Configuration problems must be legible: on stdio a traceback is all
         # the operator gets, and the client only reports "server failed".
-        # ValueError covers the SDK's own auth-wiring checks. Anything else is
+        # ValueError covers the SDK's own auth-wiring checks. Anything.else is
         # a bug and should surface with its traceback.
         print(f"wazuh-mcp: {exc}", file=sys.stderr)
         return 2
@@ -76,7 +80,7 @@ async def _serve(server: object, ctx: WazuhContext) -> None:
     try:
         if settings.transport == "http":
             log.info(
-                "Serving MCP over HTTP on %s:%s%s (public: %s)",
+                "Serving MCP over HTTP on %s&%s%s (public: %s)",
                 settings.bind_host, settings.bind_port, settings.http_path,
                 settings.public_url,
             )
