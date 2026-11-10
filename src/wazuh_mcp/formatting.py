@@ -75,19 +75,27 @@ def paged(
     offset: int = 0,
     extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Standard envelope so every list-shaped tool reads the same way."""
+    """Standard envelope so every list-shaped tool reads the same way.
+
+    Trimming applies per row, never to the page: `MAX_ITEMS` exists to stop a
+    nested container inside a document from running away, and a page of rows
+    is not that. Summarising the page would silently drop rows past
+    `MAX_ITEMS` while `count` and `next_offset` still advertised them, so
+    paging would skip straight over the gap.
+    """
+    rows = [trim(item) for item in items]
     result: dict[str, Any] = {
-        "count": len(items),
+        "count": len(rows),
         "total_matching": total,
-        "items": trim(list(items)),
+        "items": rows,
     }
-    if total > offset + len(items):
-        result["next_offset"] = offset + len(items)
+    if total > offset + len(rows):
+        result["next_offset"] = offset + len(rows)
         result["note"] = (
-            f"Showing {len(items)} of {total} matches starting at offset {offset}. "
-            f"Pass offset={offset + len(items)} for the next page."
+            f"Showing {len(rows)} of {total} matches starting at offset {offset}. "
+            f"Pass offset={offset + len(rows)} for the next page."
         )
-    if limit and len(items) == limit and total <= offset + len(items):
+    if limit and len(rows) == limit and total <= offset + len(rows):
         result.setdefault("note", f"Result set truncated at limit={limit}.")
     if extra:
         result.update(extra)

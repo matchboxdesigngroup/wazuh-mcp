@@ -181,6 +181,37 @@ def test_paged_final_page_has_no_next_offset():
     assert "next_offset" not in out
 
 
+def test_paged_counts_only_the_rows_it_returns():
+    """`count` and `next_offset` must describe the page actually emitted.
+
+    A page larger than MAX_ITEMS is where these drift apart: the envelope
+    sizes itself from the caller's list while `items` has already been cut.
+    """
+    out = paged([{"id": i} for i in range(300)], total=1000, limit=300, offset=0)
+    assert out["count"] == len(out["items"])
+    assert out["next_offset"] == len(out["items"])
+
+
+def test_paged_does_not_emit_a_truncation_sentinel():
+    """The page itself is never summarised: trimming applies within a row."""
+    out = paged([{"id": i} for i in range(300)], total=1000, limit=300, offset=0)
+    assert not any(isinstance(item, str) for item in out["items"])
+
+
+def test_paged_walks_every_row_of_a_large_result_exactly_once():
+    """Following `next_offset` to the end must yield the whole result set."""
+    rows = [{"id": i} for i in range(450)]
+    seen: list[int] = []
+    offset = 0
+    while True:
+        out = paged(rows[offset:offset + 300], total=len(rows), limit=300, offset=offset)
+        seen.extend(item["id"] for item in out["items"] if isinstance(item, dict))
+        if "next_offset" not in out:
+            break
+        offset = out["next_offset"]
+    assert seen == list(range(450))
+
+
 # --- indexer response shaping -----------------------------------------------
 
 def test_hits_of_flattens_source_and_keeps_ids():
