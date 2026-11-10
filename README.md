@@ -154,7 +154,7 @@ claude mcp add wazuh --env WAZUH_API_URL=https://wazuh.example.com:55000 --env W
 | --- | --- |
 | `wazuh_search_alerts` | The main alert query: time window, severity, agent, rule, MITRE, source IP, free text |
 | `wazuh_alert_stats` | "Top N by X" — one or two grouping levels, done server-side |
-| `wazuh_alert_timeline` | Volume over time with automatic bucket sizing and peak detection |
+| `wazuh_alert_timeline` | Volume over time with automatic bucket sizing, peak detection, and a 500-bucket cap including splits |
 | `wazuh_indexer_query` | Raw OpenSearch DSL, restricted to `wazuh-*` |
 | `wazuh_list_indices` | What data exists and how far back |
 

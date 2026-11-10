@@ -251,7 +251,11 @@ async def test_timeline_picks_interval_and_peak(srv, respx_mock):
 @pytest.mark.respx(assert_all_called=False)
 @pytest.mark.parametrize(
     "interval,key",
-    [("1d", "fixed_interval"), ("30d", "fixed_interval"), ("1w", "calendar_interval")],
+    [
+        ("1d", "fixed_interval"), ("30d", "fixed_interval"),
+        ("1w", "calendar_interval"), ("1M", "calendar_interval"),
+        ("1q", "calendar_interval"), ("1y", "calendar_interval"),
+    ],
 )
 async def test_timeline_picks_the_right_interval_parameter(srv, respx_mock, interval, key):
     """`calendar_interval` rejects multiples, so only w/M/q/y units go there."""
@@ -263,6 +267,76 @@ async def test_timeline_picks_the_right_interval_parameter(srv, respx_mock, inte
     assert hist[key] == interval
     other = "calendar_interval" if key == "fixed_interval" else "fixed_interval"
     assert other not in hist
+
+
+@pytest.mark.respx(assert_all_called=False)
+@pytest.mark.parametrize("interval", ["banana", "0m", "2M"])
+async def test_timeline_rejects_invalid_intervals_before_upstream(srv, respx_mock, interval):
+    route = respx_mock.post(url__startswith=f"{IDX}/wazuh-alerts-").respond(
+        200, json=search_response([], total=0, aggregations={"timeline": {"buckets": []}})
+    )
+
+    message = await call_expect_error(
+        srv, "wazuh_alert_timeline", start="24h", interval=interval
+    )
+
+    assert "interval" in message.lower()
+    assert len(route.calls) == 0
+
+
+@pytest.mark.respx(assert_all_called=False)
+async def test_timeline_rejects_excessive_bucket_count_before_upstream(srv, respx_mock):
+    route = respx_mock.post(url__startswith=f"{IDX}/wazuh-alerts-").respond(
+        200, json=search_response([], total=0, aggregations={"timeline": {"buckets": []}})
+    )
+
+    message = await call_expect_error(
+        srv, "wazuh_alert_timeline", start="30d", interval="1m"
+    )
+
+    assert "500-bucket limit" in message
+    assert "1d" in message
+    assert len(route.calls) == 0
+
+
+@pytest.mark.respx(assert_all_called=False)
+async def test_timeline_rejects_excessive_nested_buckets_before_upstream(srv, respx_mock):
+    route = respx_mock.post(url__startswith=f"{IDX}/wazuh-alerts-").respond(
+        200, json=search_response([], total=0, aggregations={"timeline": {"buckets": []}})
+    )
+
+    message = await call_expect_error(
+        srv,
+        "wazuh_alert_timeline",
+        start="30d",
+        interval="1d",
+        split_by="rule.level",
+        split_top=20,
+    )
+
+    assert "nested terms" in message
+    assert "500-bucket limit" in message
+    assert "1w" in message
+    assert len(route.calls) == 0
+
+
+@pytest.mark.respx(assert_all_called=False)
+async def test_timeline_widens_automatic_interval_to_fit_nested_bucket_budget(srv, respx_mock):
+    route = respx_mock.post(url__startswith=f"{IDX}/wazuh-alerts-").respond(
+        200, json=search_response([], total=0, aggregations={"timeline": {"buckets": []}})
+    )
+
+    out = await call(
+        srv,
+        "wazuh_alert_timeline",
+        start="30d",
+        split_by="rule.level",
+        split_top=20,
+    )
+
+    assert out["interval"] == "1w"
+    histogram = json.loads(route.calls[0].request.content)["aggs"]["timeline"]["date_histogram"]
+    assert histogram["calendar_interval"] == "1w"
 
 
 @pytest.mark.respx(assert_all_called=False)

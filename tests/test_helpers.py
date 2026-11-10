@@ -20,6 +20,8 @@ from wazuh_mcp.formatting import (
 )
 from wazuh_mcp.query import (
     auto_interval,
+    auto_interval_with_bucket_limit,
+    interval_bucket_count,
     interval_key,
     parse_time,
     severity_clause,
@@ -74,6 +76,36 @@ def test_auto_interval_scales_with_window(span, expected):
     else:
         start = parse_time(span, now=NOW)
     assert auto_interval(start, NOW) == expected
+
+
+def test_auto_interval_with_bucket_limit_preserves_target_and_widens_when_needed():
+    day_start = parse_time("24h", now=NOW)
+    assert auto_interval_with_bucket_limit(day_start, NOW, max_buckets=500) == "30m"
+
+    month_start = parse_time("30d", now=NOW)
+    assert auto_interval_with_bucket_limit(month_start, NOW, max_buckets=23) == "1w"
+
+
+@pytest.mark.parametrize(
+    "start,end,interval,expected",
+    [
+        ("2026-08-26T00:00:10Z", "2026-08-26T00:02:10Z", "1m", 3),
+        ("2026-01-04T23:59:00Z", "2026-01-05T00:01:00Z", "1w", 2),
+        ("2026-01-31T00:00:00Z", "2026-03-01T00:00:00Z", "1M", 3),
+        ("2026-03-31T00:00:00Z", "2026-04-01T00:01:00Z", "1q", 2),
+        ("2025-12-31T23:59:00Z", "2026-01-01T00:01:00Z", "1y", 2),
+    ],
+)
+def test_interval_bucket_count_respects_fixed_and_calendar_boundaries(
+    start, end, interval, expected,
+):
+    assert interval_bucket_count(parse_time(start), parse_time(end), interval) == expected
+
+
+@pytest.mark.parametrize("interval", ["banana", "0m", "1.5h", "2w", "2M"])
+def test_interval_bucket_count_rejects_invalid_intervals(interval):
+    with pytest.raises(WazuhMCPError, match="interval"):
+        interval_bucket_count(NOW, NOW, interval)
 
 
 def test_severity_clause_bands_do_not_overlap():

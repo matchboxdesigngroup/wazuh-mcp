@@ -91,6 +91,7 @@ _INTERVALS: tuple[tuple[int, str], ...] = (
     (60, "1m"), (300, "5m"), (600, "10m"), (1800, "30m"),
     (3600, "1h"), (10800, "3h"), (21600, "6h"), (43200, "12h"),
     (86400, "1d"), (604800, "1w"), (2592000, "30d"),
+    (7776000, "1q"), (31536000, "1y"),
 )
 
 
@@ -112,6 +113,14 @@ def auto_interval(start: datetime, end: datetime, buckets: int = 40) -> str:
 
 #: Units that `fixed_interval` cannot express, so must go to `calendar_interval`.
 _CALENDAR_UNITS = frozenset({"w", "M", "q", "y"})
+_INTERVAL_PATTERN = re.compile(r"(?P<count>\d+)(?P<unit>ms|[smhdwMqy])")
+_FIXED_INTERVAL_MICROSECONDS = {
+    "ms": 1_000,
+    "s": 1_000_000,
+    "m": 60_000_000,
+    "h": 3_600_000_000,
+    "d": 86_400_000_000,
+}
 
 
 def interval_key(interval: str) -> str:
@@ -123,6 +132,81 @@ def interval_key(interval: str) -> str:
     """
     unit = interval.strip()[-1:] or "h"
     return "calendar_interval" if unit in _CALENDAR_UNITS else "fixed_interval"
+
+
+def interval_bucket_count(start: datetime, end: datetime, interval: str) -> int:
+    """Count date-histogram buckets that can fall within a time range.
+
+    Fixed intervals align to the Unix epoch; calendar intervals align to UTC
+    calendar boundaries. The latter only accept one unit in OpenSearch.
+    """
+    match = _INTERVAL_PATTERN.fullmatch(interval) if isinstance(interval, str) else None
+    if match is None or int(match.group("count")) < 1:
+        raise WazuhMCPError(
+            f"Invalid interval {interval!r}. Use a positive interval such as '5m' or '1d'."
+        )
+
+    amount = int(match.group("count"))
+    unit = match.group("unit")
+    start_utc = start.replace(tzinfo=UTC) if start.tzinfo is None else start.astimezone(UTC)
+    end_utc = end.replace(tzinfo=UTC) if end.tzinfo is None else end.astimezone(UTC)
+    if start_utc > end_utc:
+        raise WazuhMCPError(
+            f"Start time ({start_utc.isoformat()}) is after end time ({end_utc.isoformat()})"
+        )
+
+    if unit in _CALENDAR_UNITS:
+        if amount != 1:
+            raise WazuhMCPError(
+                f"Invalid calendar interval {interval!r}. Calendar intervals must be singular; "
+                "use '1w', '1M', '1q', or '1y'."
+            )
+        if unit == "w":
+            epoch_monday = datetime(1970, 1, 5, tzinfo=UTC).date().toordinal()
+            start_index = (start_utc.date().toordinal() - epoch_monday) // 7
+            end_index = (end_utc.date().toordinal() - epoch_monday) // 7
+        elif unit == "M":
+            start_index = start_utc.year * 12 + start_utc.month - 1
+            end_index = end_utc.year * 12 + end_utc.month - 1
+        elif unit == "q":
+            start_index = start_utc.year * 4 + (start_utc.month - 1) // 3
+            end_index = end_utc.year * 4 + (end_utc.month - 1) // 3
+        else:  # y
+            start_index = start_utc.year
+            end_index = end_utc.year
+        return end_index - start_index + 1
+
+    step_microseconds = amount * _FIXED_INTERVAL_MICROSECONDS[unit]
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+
+    def epoch_microseconds(value: datetime) -> int:
+        delta = value - epoch
+        return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+    return (
+        epoch_microseconds(end_utc) // step_microseconds
+        - epoch_microseconds(start_utc) // step_microseconds
+        + 1
+    )
+
+
+def auto_interval_with_bucket_limit(
+    start: datetime, end: datetime, max_buckets: int, target_buckets: int = 40
+) -> str | None:
+    """Choose a preferred interval, widening it only to stay within a budget."""
+    if max_buckets < 1:
+        return None
+
+    preferred = auto_interval(
+        start, end, buckets=min(max_buckets, max(target_buckets, 1))
+    )
+    preferred_index = next(
+        index for index, (_, label) in enumerate(_INTERVALS) if label == preferred
+    )
+    for _, candidate in _INTERVALS[preferred_index:]:
+        if interval_bucket_count(start, end, candidate) <= max_buckets:
+            return candidate
+    return None
 
 
 def severity_clause(severity: str) -> dict[str, Any]:

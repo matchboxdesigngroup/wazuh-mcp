@@ -10,12 +10,13 @@ from pydantic import Field
 
 from ..clients.indexer import hits_of, total_of
 from ..context import WazuhContext
-from ..errors import UpstreamError
+from ..errors import UpstreamError, WazuhMCPError
 from ..formatting import buckets_to_rows, dig, paged, project, severity_of, trim
 from ..query import (
     SEVERITY_BANDS,
-    auto_interval,
+    auto_interval_with_bucket_limit,
     build_bool,
+    interval_bucket_count,
     interval_key,
     parse_time,
     query_string,
@@ -23,6 +24,8 @@ from ..query import (
     term_or_terms,
     time_range,
 )
+
+MAX_TIMELINE_BUCKETS = 500
 
 #: Compact projection returned by default — enough to triage without flooding
 #: the context with every field of every alert.
@@ -317,7 +320,9 @@ def register(server: Any, ctx: WazuhContext) -> None:
         description=(
             "Bucket alert counts into time intervals to show trend and spikes — "
             "'was there a spike overnight', 'alert volume per hour this week'. "
-            "Optionally splits each interval by a field such as severity or agent."
+            "Optionally splits each interval by a field such as severity or agent. "
+            "The 500-bucket limit includes split terms; invalid or oversized intervals "
+            "are rejected before querying the Indexer."
         ),
         annotations=READ_ONLY,
     )
@@ -327,8 +332,9 @@ def register(server: Any, ctx: WazuhContext) -> None:
         interval: Annotated[
             str | None,
             Field(description=(
-                "Bucket size such as '5m', '1h', '1d'. Chosen automatically from "
-                "the window length when omitted."
+                "Positive bucket size such as '5m', '1h', '1d', '1w', '1M', '1q', or '1y'. "
+                "Calendar units must be singular. Chosen automatically when omitted; "
+                "the total time and split buckets cannot exceed 500."
             )),
         ] = None,
         split_by: Annotated[
@@ -344,15 +350,40 @@ def register(server: Any, ctx: WazuhContext) -> None:
         text: Annotated[str | None, Field()] = None,
         split_top: Annotated[int, Field(ge=1, le=20)] = 5,
     ) -> dict[str, Any]:
-        indexer = await ctx.indexer()
         start_dt = parse_time(start or "24h")
         end_dt = parse_time(end) if end else parse_time("now")
-        chosen = interval or auto_interval(start_dt, end_dt)
+        bucket_multiplier = 1 + split_top if split_by else 1
+        time_bucket_limit = MAX_TIMELINE_BUCKETS // bucket_multiplier
+        chosen = interval if interval is not None else auto_interval_with_bucket_limit(
+            start_dt, end_dt, time_bucket_limit
+        )
 
         filters = build_alert_filters(
             start=start, end=end, agent_id=agent_id, rule_group=rule_group,
             severity=severity, min_level=min_level,
         )
+        if chosen is None:
+            raise WazuhMCPError(
+                "The time window is too wide for the 500-bucket limit at supported "
+                "intervals. Use a narrower time window."
+            )
+
+        bucket_count = interval_bucket_count(start_dt, end_dt, chosen)
+        total_bucket_count = bucket_count * bucket_multiplier
+        if total_bucket_count > MAX_TIMELINE_BUCKETS:
+            suggested = auto_interval_with_bucket_limit(
+                start_dt, end_dt, time_bucket_limit
+            )
+            if suggested is not None:
+                advice = f"Try interval {suggested!r} or a narrower time window."
+            else:
+                advice = "Use a narrower time window."
+            raise WazuhMCPError(
+                f"Interval {chosen!r} would produce up to {bucket_count:,} time buckets "
+                f"and {total_bucket_count:,} buckets including nested terms, exceeding "
+                f"the {MAX_TIMELINE_BUCKETS}-bucket limit. {advice}"
+            )
+
         must = [c for c in (query_string(text),) if c]
 
         histogram: dict[str, Any] = {
@@ -372,6 +403,7 @@ def register(server: Any, ctx: WazuhContext) -> None:
             "size": 0,
             "aggs": {"timeline": histogram},
         }
+        indexer = await ctx.indexer()
         response = await indexer.search(ctx.settings.alerts_index, body)
         buckets = ((response.get("aggregations") or {}).get("timeline") or {}).get("buckets") or []
         rows = buckets_to_rows(buckets, key_name="time", sub_agg="nested")
