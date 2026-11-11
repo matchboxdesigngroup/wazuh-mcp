@@ -224,17 +224,26 @@ async def test_find_software_uses_fleet_wide_endpoint(srv, respx_mock, auth_rout
     assert out["source"] == "experimental fleet-wide endpoint"
 
 
+@pytest.mark.parametrize(("status", "body"), [
+    (400, {"title": "Bad Request", "detail": "experimental features disabled"}),
+    (404, {"title": "Not Found", "detail": "endpoint is not available"}),
+])
 @pytest.mark.respx(assert_all_called=False)
-async def test_find_software_falls_back_to_per_agent_scan(srv, respx_mock, auth_route):
+async def test_find_software_falls_back_to_per_agent_scan(
+    srv, respx_mock, auth_route, status, body,
+):
     """Hardened deployments disable /experimental, so scan agents individually."""
     respx_mock.get(f"{API}/experimental/syscollector/packages").respond(
-        400, json={"title": "Bad Request", "detail": "experimental features disabled"}
+        status, json=body
     )
     respx_mock.get(f"{API}/agents").respond(200, json=envelope([
         {"id": "000", "name": "manager"},
         {"id": "001", "name": "web-01"},
         {"id": "002", "name": "web-02"},
     ]))
+    respx_mock.get(f"{API}/agents/summary/status").respond(
+        200, json=envelope([{"total": 4, "active": 3, "disconnected": 1}])
+    )
 
     def packages(request: httpx.Request) -> httpx.Response:
         if "/001/" in request.url.path:
@@ -251,15 +260,25 @@ async def test_find_software_falls_back_to_per_agent_scan(srv, respx_mock, auth_
     assert out["agents_scanned"] == 2, "agent 000 (the manager) is excluded"
     assert out["match_count"] == 1
     assert out["matches"][0]["agent_name"] == "web-01"
+    assert out["agents_failed"] == []
+    assert out["inactive_agents_skipped"] == 1
+    assert out["truncated"] is True
+    assert "inactive_agents_skipped" in out["truncation_reasons"]
+    assert out["total_matching"] == 1
     assert "experimental" in out["note"]
 
 
 @pytest.mark.respx(assert_all_called=False)
 async def test_find_software_tolerates_failing_agents(srv, respx_mock, auth_route):
-    respx_mock.get(f"{API}/experimental/syscollector/packages").respond(400, json={})
+    respx_mock.get(f"{API}/experimental/syscollector/packages").respond(
+        400, json={"title": "Bad Request", "detail": "experimental features disabled"}
+    )
     respx_mock.get(f"{API}/agents").respond(200, json=envelope([
         {"id": "001", "name": "ok"}, {"id": "002", "name": "broken"},
     ]))
+    respx_mock.get(f"{API}/agents/summary/status").respond(
+        200, json=envelope([{"total": 2, "active": 2}])
+    )
 
     def packages(request: httpx.Request) -> httpx.Response:
         if "/002/" in request.url.path:
@@ -270,6 +289,68 @@ async def test_find_software_tolerates_failing_agents(srv, respx_mock, auth_rout
 
     out = await call(srv, "wazuh_find_software", package="openssl")
     assert out["match_count"] == 1, "one failing agent must not fail the search"
+    assert out["agents_scanned"] == 2
+    assert [agent["agent_id"] for agent in out["agents_failed"]] == ["002"]
+    assert out["truncated"] is True
+    assert "agent_failures" in out["truncation_reasons"]
+
+
+@pytest.mark.parametrize("status", [400, 403, 500])
+@pytest.mark.respx(assert_all_called=False)
+async def test_find_software_does_not_fall_back_for_other_errors(
+    srv, respx_mock, auth_route, status,
+):
+    endpoint = respx_mock.get(f"{API}/experimental/syscollector/packages").respond(
+        status, json={"title": "Request failed", "detail": "no fallback reason"}
+    )
+    agents = respx_mock.get(f"{API}/agents").respond(200, json=envelope([]))
+    packages = respx_mock.get(url__regex=rf"{API}/syscollector/\d+/packages").respond(
+        200, json=envelope([])
+    )
+
+    message = await call_err(srv, "wazuh_find_software", package="openssl")
+
+    assert "HTTP" in message
+    assert endpoint.call_count == 1
+    assert agents.call_count == 0
+    assert packages.call_count == 0
+
+
+@pytest.mark.parametrize("operator", [";", ",", "(", ")", "<", ">", "=", "~", "!"])
+@pytest.mark.respx(assert_all_called=False)
+async def test_find_software_rejects_wql_operators_before_network(
+    srv, respx_mock, auth_route, operator,
+):
+    message = await call_err(
+        srv, "wazuh_find_software", package=f"openssl{operator}injected"
+    )
+
+    assert "package" in message
+    assert "query operators" in message
+    assert auth_route.call_count == 0
+    assert respx_mock.calls.call_count == 0
+
+
+@pytest.mark.respx(assert_all_called=False)
+async def test_find_software_rejects_unsafe_version_before_network(srv, respx_mock, auth_route):
+    message = await call_err(
+        srv, "wazuh_find_software", package="openssl", version="3.0;name~*"
+    )
+
+    assert "version" in message
+    assert auth_route.call_count == 0
+    assert respx_mock.calls.call_count == 0
+
+
+@pytest.mark.respx(assert_all_called=False)
+async def test_find_software_rejects_query_injection_example_before_network(
+    srv, respx_mock, auth_route,
+):
+    message = await call_err(srv, "wazuh_find_software", package="a;version=1")
+
+    assert "package" in message
+    assert auth_route.call_count == 0
+    assert respx_mock.calls.call_count == 0
 
 
 # --- MITRE id handling ------------------------------------------------------

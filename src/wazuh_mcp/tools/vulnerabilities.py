@@ -18,7 +18,7 @@ from ..clients.indexer import hits_of, total_of
 from ..context import WazuhContext
 from ..errors import ConfigError, UpstreamError, WazuhMCPError
 from ..formatting import buckets_to_rows, paged, project, trim
-from ..query import build_bool, term_or_terms
+from ..query import build_bool, term_or_terms, validate_wql_value
 
 #: Version at which vulnerability state moved to the Indexer.
 INDEXER_STATE_SINCE = (4, 8)
@@ -119,6 +119,8 @@ def register(server: Any, ctx: WazuhContext) -> None:
         limit: Annotated[int | None, Field(ge=1)] = 50,
         offset: Annotated[int, Field(ge=0)] = 0,
     ) -> dict[str, Any]:
+        if package is not None:
+            package = validate_wql_value(package, field="package")
         if await uses_indexer_state(ctx):
             return await _list_from_indexer(
                 ctx, agent_id=agent_id, severity=severity, cve=cve,

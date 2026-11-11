@@ -28,6 +28,18 @@ SEVERITY_BANDS: dict[str, tuple[int, int]] = {
     "info": (0, 3),
 }
 
+WQL_VALUE_OPERATORS = frozenset(";,()<>=~!")
+
+
+def validate_wql_value(value: str, *, field: str) -> str:
+    """Reject WQL syntax operators from values interpolated into a WQL query."""
+    invalid = sorted(set(value) & WQL_VALUE_OPERATORS)
+    if invalid:
+        raise WazuhMCPError(
+            f"{field} must not contain Wazuh query operators: {', '.join(invalid)}"
+        )
+    return value
+
 
 def parse_time(value: str, *, now: datetime | None = None) -> datetime:
     """Parse `24h`, `now-7d`, `now`, or an ISO-8601 timestamp into UTC.

@@ -105,6 +105,20 @@ async def test_pre_48_fleet_wide_query_explains_the_limitation(srv, respx_mock, 
 
 
 @pytest.mark.respx(assert_all_called=False)
+async def test_vulnerabilities_rejects_wql_package_operators_before_network(
+    srv, respx_mock, auth_route,
+):
+    message = await call_err(
+        srv, "wazuh_vulnerabilities", agent_id=["001"], package="openssl;severity=Critical"
+    )
+
+    assert "package" in message
+    assert "query operators" in message
+    assert auth_route.call_count == 0
+    assert respx_mock.calls.call_count == 0
+
+
+@pytest.mark.respx(assert_all_called=False)
 async def test_unreadable_version_falls_back_to_indexer(srv, respx_mock, auth_route):
     """A manager we cannot version-check should not block a modern query."""
     respx_mock.get(f"{API}/manager/info").respond(403, json={"title": "Permission denied"})
