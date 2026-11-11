@@ -296,6 +296,95 @@ async def test_indexer_query_passes_body_through(srv, respx_mock):
 
 
 @pytest.mark.respx(assert_all_called=False)
+async def test_indexer_query_caps_hit_size_without_mutating_input(srv, respx_mock):
+    route = respx_mock.post(url__startswith=f"{IDX}/wazuh-alerts-").respond(
+        200, json=search_response([], total=0)
+    )
+    body = {"query": {"match_all": {}}, "size": 10_000}
+
+    await call(srv, "wazuh_indexer_query", body=body)
+
+    assert json.loads(route.calls[0].request.content) == {
+        "query": {"match_all": {}}, "size": 500,
+    }
+    assert body["size"] == 10_000
+
+
+@pytest.mark.respx(assert_all_called=False)
+async def test_indexer_query_defaults_hit_size_to_ten(srv, respx_mock):
+    route = respx_mock.post(url__startswith=f"{IDX}/wazuh-alerts-").respond(
+        200, json=search_response([], total=0)
+    )
+    body = {"query": {"match_all": {}}}
+
+    await call(srv, "wazuh_indexer_query", body=body)
+
+    assert json.loads(route.calls[0].request.content) == {
+        "query": {"match_all": {}}, "size": 10,
+    }
+
+
+@pytest.mark.respx(assert_all_called=False)
+async def test_indexer_query_preserves_aggregation_only_body(srv, respx_mock):
+    route = respx_mock.post(url__startswith=f"{IDX}/wazuh-alerts-").respond(
+        200,
+        json=search_response([], total=0, aggregations={"by_rule": {"buckets": []}}),
+    )
+    body = {
+        "query": {"bool": {"filter": [{"term": {"rule.level": 7}}]}},
+        "size": 0,
+        "aggs": {"by_rule": {"terms": {"field": "rule.id", "size": 5}}},
+    }
+
+    await call(srv, "wazuh_indexer_query", body=body)
+
+    assert json.loads(route.calls[0].request.content) == body
+
+
+@pytest.mark.respx(assert_all_called=False)
+async def test_indexer_query_allows_script_as_a_field_and_aggregation_name(srv, respx_mock):
+    route = respx_mock.post(url__startswith=f"{IDX}/wazuh-alerts-").respond(
+        200, json=search_response([], total=0)
+    )
+    body = {
+        "query": {"term": {"script": "enabled"}},
+        "size": 1,
+        "aggs": {"script": {"terms": {"field": "agent.id", "size": 1}}},
+    }
+
+    await call(srv, "wazuh_indexer_query", body=body)
+
+    assert json.loads(route.calls[0].request.content) == body
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ({"script_fields": {"score": {"script": {"source": "1"}}}}, "script_fields"),
+        ({"query": {"script": {"script": {"source": "doc['agent.id'].value"}}}}, "'script'"),
+        ({"aggs": {"computed": {"scripted_metric": {"map_script": "return 1"}}}}, "scripted_metric"),
+        ({"runtime_mappings": {"computed": {"type": "long", "script": {"source": "1"}}}}, "runtime_mappings"),
+        (
+            {"sort": [{"_script": {"type": "number", "script": {"source": "1"}}}]},
+            "script sorts",
+        ),
+        (
+            {"query": {"terms": {"agent.id": {"index": "other", "id": "doc-1", "path": "ids"}}}},
+            "terms-lookup",
+        ),
+    ],
+)
+@pytest.mark.respx(assert_all_called=False)
+async def test_indexer_query_rejects_scripts_and_terms_lookups_before_request(
+    srv, respx_mock, body, message,
+):
+    error = await call_expect_error(srv, "wazuh_indexer_query", body=body)
+
+    assert message in error
+    assert len(respx_mock.calls) == 0
+
+
+@pytest.mark.respx(assert_all_called=False)
 async def test_empty_index_pattern_is_not_an_error(srv, respx_mock):
     """A fresh cluster with no backing indices should return zero, not fail."""
     route = respx_mock.post(url__startswith=f"{IDX}/wazuh-alerts-").respond(

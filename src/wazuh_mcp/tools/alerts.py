@@ -10,7 +10,7 @@ from pydantic import Field
 
 from ..clients.indexer import hits_of, total_of
 from ..context import WazuhContext
-from ..errors import UpstreamError
+from ..errors import UpstreamError, WazuhMCPError
 from ..formatting import buckets_to_rows, dig, paged, project, severity_of, trim
 from ..query import (
     SEVERITY_BANDS,
@@ -23,6 +23,92 @@ from ..query import (
     term_or_terms,
     time_range,
 )
+
+UNSUPPORTED_INDEXER_QUERY_KEYS = frozenset({
+    "script",
+    "script_fields",
+    "scripted_metric",
+    "runtime_mappings",
+})
+QUERY_FIELD_MAP_KEYS = frozenset({
+    "term", "terms", "range", "match", "match_phrase", "match_phrase_prefix",
+    "match_bool_prefix", "prefix", "wildcard", "regexp", "fuzzy", "span_term",
+})
+AGGREGATION_KEYS = frozenset({"aggs", "aggregations"})
+
+
+def validate_indexer_query_body(body: dict[str, Any]) -> None:
+    """Reject DSL features that escape the Wazuh namespace or run scripts."""
+    pending: list[tuple[Any, str]] = [(body, "body")]
+    while pending:
+        value, mode = pending.pop()
+        if isinstance(value, list):
+            pending.extend((item, mode) for item in value)
+            continue
+        if isinstance(value, dict):
+            if mode in {"body", "query", "aggregation", "aggregation_options"}:
+                unsupported = UNSUPPORTED_INDEXER_QUERY_KEYS.intersection(value)
+                if unsupported:
+                    key = min(unsupported)
+                    raise WazuhMCPError(
+                        f"OpenSearch query feature {key!r} is not allowed"
+                    )
+
+            if mode == "body":
+                pending.extend(
+                    (
+                        child,
+                        "query" if key in {"query", "post_filter", "rescore"}
+                        else "aggregation_names",
+                    )
+                    for key, child in value.items()
+                    if key in {"query", "post_filter", "rescore"} or key in AGGREGATION_KEYS
+                )
+                if "sort" in value:
+                    pending.append((value["sort"], "sort"))
+            elif mode == "aggregation_names":
+                pending.extend((definition, "aggregation") for definition in value.values())
+            elif mode == "query":
+                terms = value.get("terms")
+                if isinstance(terms, dict) and any(
+                    isinstance(clause, dict) and "index" in clause
+                    for clause in terms.values()
+                ):
+                    raise WazuhMCPError(
+                        "OpenSearch terms-lookup queries are not allowed"
+                    )
+                for key, child in value.items():
+                    if key in QUERY_FIELD_MAP_KEYS:
+                        continue
+                    if key in AGGREGATION_KEYS:
+                        pending.append((child, "aggregation_names"))
+                    elif key == "sort":
+                        pending.append((child, "sort"))
+                    elif key == "inner_hits":
+                        pending.append((child, "body"))
+                    else:
+                        pending.append((child, "query"))
+            elif mode in {"aggregation", "aggregation_options"}:
+                for key, child in value.items():
+                    if key in AGGREGATION_KEYS:
+                        pending.append((child, "aggregation_names"))
+                    elif key == "filter":
+                        pending.append((child, "query"))
+                    elif key == "sort":
+                        pending.append((child, "sort"))
+                    elif key == "inner_hits":
+                        pending.append((child, "body"))
+                    elif key == "filters" and mode == "aggregation":
+                        filters = child.get("filters", child) if isinstance(child, dict) else child
+                        if isinstance(filters, dict):
+                            pending.extend((query, "query") for query in filters.values())
+                        elif isinstance(filters, list):
+                            pending.extend((query, "query") for query in filters)
+                    else:
+                        pending.append((child, "aggregation_options"))
+            elif mode == "sort" and "_script" in value:
+                raise WazuhMCPError("OpenSearch script sorts are not allowed")
+
 
 #: Compact projection returned by default — enough to triage without flooding
 #: the context with every field of every alert.
@@ -392,8 +478,9 @@ def register(server: Any, ctx: WazuhContext) -> None:
         description=(
             "Escape hatch: send a raw OpenSearch query DSL body to a Wazuh index "
             "for anything the purpose-built alert tools cannot express — unusual "
-            "aggregations, scripted fields, composite queries. Restricted to "
-            "wazuh-* indices and read-only _search."
+            "aggregations and composite queries. Scripts and terms lookups are "
+            "disabled, and returned hits are capped at WAZUH_MAX_RESULTS. "
+            "Restricted to wazuh-* indices and read-only _search."
         ),
         annotations=READ_ONLY,
     )
@@ -403,7 +490,9 @@ def register(server: Any, ctx: WazuhContext) -> None:
             Field(description=(
                 "OpenSearch query DSL body, e.g. "
                 '{"query": {"match_all": {}}, "size": 5, "aggs": {...}}. '
-                "Always set an explicit small 'size' unless you only need aggregations."
+                "Scripts and terms lookups are not allowed. The hit size defaults "
+                "to 10 and is capped at WAZUH_MAX_RESULTS; use size 0 for "
+                "aggregation-only queries."
             )),
         ],
         index: Annotated[
@@ -414,9 +503,17 @@ def register(server: Any, ctx: WazuhContext) -> None:
             )),
         ] = None,
     ) -> dict[str, Any]:
+        validate_indexer_query_body(body)
+        query_body = dict(body)
+        requested_size = query_body.get("size")
+        query_body["size"] = (
+            0 if type(requested_size) is int and requested_size == 0
+            else ctx.clamp(requested_size, default=10)
+        )
+
         indexer = await ctx.indexer()
         target = index or ctx.settings.alerts_index
-        response = await indexer.search(target, body)
+        response = await indexer.search(target, query_body)
         out: dict[str, Any] = {"index": target, "total_matching": total_of(response)}
         docs = hits_of(response)
         if docs:
